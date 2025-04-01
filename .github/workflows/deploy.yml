@@ -1,43 +1,56 @@
-name: Deploy Node.js App on Azure VM
+name: Automated Azure Deployment with Existing SP
 
 on:
   push:
-    branches:
-      - master
+    branches: [ master ]
 
 env:
   TF_IN_AUTOMATION: true
-  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  RESOURCE_GROUP_NAME: "github-actions-rg-$(date +%s)"
+  VM_NAME: "auto-vm-$(date +%s)"
 
 jobs:
-  deploy:
+  setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    outputs:
+      ssh_pub_key: ${{ steps.generate-ssh.outputs.public_key }}
+      ssh_priv_key: ${{ steps.generate-ssh.outputs.private_key }}
 
-    # Remove the id-token permission since we're not using OIDC
-    permissions:
-      contents: read
+    steps:
+      - name: Generate SSH Key Pair
+        id: generate-ssh
+        run: |
+          ssh-keygen -t rsa -b 4096 -f ./id_rsa -N '' -q
+          echo "public_key=$(cat ./id_rsa.pub)" >> $GITHUB_OUTPUT
+          echo "private_key<<EOF" >> $GITHUB_OUTPUT
+          cat ./id_rsa >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Login to Azure with Service Principal
+      - name: Login to Azure
         uses: azure/login@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}  # Use JSON format credentials
+          creds: ${{ secrets.AZURE_CREDENTIALS }}  # Your existing service principal JSON
           enable-AzPSSession: false
-          environment: azurecloud
-          allow-no-subscriptions: false
-          auth-type: service_principal
 
-      - name: Set up Terraform
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_wrapper: false
+
+      - name: Configure Terraform
+        run: |
+          cat > terraform.tfvars <<EOF
+          ssh_public_key = "${{ needs.setup.outputs.ssh_pub_key }}"
+          resource_group_name = "${{ env.RESOURCE_GROUP_NAME }}"
+          vm_name = "${{ env.VM_NAME }}"
+          EOF
 
       - name: Terraform Init
         run: terraform init -input=false
@@ -45,48 +58,41 @@ jobs:
       - name: Terraform Apply
         run: terraform apply -auto-approve -parallelism=4
         env:
-          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Get Terraform Outputs
-        id: outputs
+      - name: Get Outputs
+        id: tf-outputs
         run: |
-          echo "PUBLIC_IP=$(terraform output -raw public_ip)" >> $GITHUB_ENV
-          echo "SSH_PRIVATE_KEY<<EOF" >> $GITHUB_ENV
-          terraform output -raw ssh_private_key >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          echo "public_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
 
-      - name: Wait for VM to be ready
-        run: |
-          for i in {1..30}; do
-            if nc -z -w5 ${{ env.PUBLIC_IP }} 22; then
-              echo "VM is ready"
-              exit 0
-            fi
-            echo "Waiting for VM to be ready... Attempt $i/30"
-            sleep 10
-          done
-          echo "Timeout waiting for VM"
-          exit 1
-
-      - name: Install Docker and Deploy App
+      - name: Deploy Application
         uses: appleboy/ssh-action@v0.1.7
         with:
-          host: ${{ env.PUBLIC_IP }}
+          host: ${{ steps.tf-outputs.outputs.public_ip }}
           username: azureuser
-          key: ${{ env.SSH_PRIVATE_KEY }}
+          key: ${{ needs.setup.outputs.ssh_priv_key }}
           script: |
-            if ! command -v docker &>/dev/null; then
-              sudo apt-get update -qy
-              sudo apt-get install -qy docker.io
-              sudo systemctl enable --now docker
-              sudo usermod -aG docker azureuser
-            fi
-            
-            cd ~/docker_app/nodejs-app-first-dockerfile
-            docker build -t nodejs-app .
-            docker run -d -p 8080:8080 --name nodejs-container nodejs-app
+            sudo apt-get update -y
+            sudo apt-get install -y docker.io
+            sudo systemctl enable --now docker
+            sudo docker run -d -p 8080:8080 --name app your-docker-image
 
-      - name: Output Application URL
+  cleanup:
+    needs: [setup, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Delete Resource Group
         run: |
-          echo "Application deployed successfully!"
-          echo "Access your Node.js app at: http://${{ env.PUBLIC_IP }}:8080"
+          az group delete \
+            --name "${{ env.RESOURCE_GROUP_NAME }}" \
+            --yes \
+            --no-wait

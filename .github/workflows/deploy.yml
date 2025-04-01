@@ -8,7 +8,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     permissions:
       id-token: write  # Required for authentication with Azure using OIDC
 
@@ -30,7 +29,7 @@ jobs:
         run: terraform init
 
       - name: Apply Terraform configuration
-        run: terraform apply -auto-approve
+        run: terraform apply -auto-approve -parallelism=10 # Added parallelism to potentially speed up apply
 
       - name: Get SSH Private Key from Terraform Output
         id: get-ssh-key
@@ -41,7 +40,7 @@ jobs:
         run: echo "PUBLIC_IP=$(terraform output -raw public_ip)" >> $GITHUB_ENV
 
       - name: Wait for VM to be ready
-        run: sleep 60  # Give VM time to boot up
+        run: sleep 60  # Give VM time to boot up (adjust if needed)
 
       - name: Install Docker on Azure VM
         uses: appleboy/ssh-action@v0.1.7
@@ -65,3 +64,11 @@ jobs:
 
       - name: Output Application URL
         run: echo "Your Node.js app is live at http://${{ env.PUBLIC_IP }}:8080"
+
+      - name: Total Execution Time
+        run: |
+          end_time=$(date +%s)
+          start_time=$(($end_time - $GITHUB_RUN_DURATION))
+          echo "Workflow started at: $(date -d "@$start_time")"
+          echo "Workflow ended at: $(date -d "@$end_time")"
+          echo "Total execution time: $(($GITHUB_RUN_DURATION / 60)) minutes and $(($GITHUB_RUN_DURATION % 60)) seconds"

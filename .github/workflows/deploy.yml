@@ -1,17 +1,16 @@
-name: Terraform CI/CD
+name: Deploy Node.js App on Azure VM
 
 on:
   push:
     branches:
-      - master
-  pull_request:
-    branches:
-      - master
+      - master  # Triggers workflow when code is pushed to 'master'
 
 jobs:
-  terraform:
-    name: 'Terraform Apply'
+  deploy:
     runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write  # Enables OIDC authentication
 
     steps:
       - name: Checkout repository
@@ -20,24 +19,57 @@ jobs:
       - name: Log in to Azure
         uses: azure/login@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          auth-type: "SERVICE_PRINCIPAL"
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v2
-        with:
-          terraform_version: latest
 
       - name: Initialize Terraform
         run: terraform init
 
-      - name: Validate Terraform
+      - name: Validate Terraform Configuration
         run: terraform validate
 
-      - name: Plan Terraform changes
-        run: terraform plan -out=tfplan
+      - name: Check Terraform Formatting
+        run: terraform fmt -check
 
-      - name: Apply Terraform changes
+      - name: Apply Terraform Configuration
         run: terraform apply -auto-approve
 
-      - name: Output Public IP
-        run: echo "Public IP: $(terraform output -raw public_ip)"
+      - name: Get Public IP from Terraform Output
+        id: get-ip
+        run: echo "PUBLIC_IP=$(terraform output -raw public_ip)" >> $GITHUB_ENV
+
+      - name: Wait for VM to be ready
+        run: sleep 60  # Give VM time to boot up
+
+      - name: Install Docker on Azure VM
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ env.PUBLIC_IP }}
+          username: azureuser
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            sudo apt-get update
+            sudo apt-get install -y docker.io
+            sudo systemctl enable docker
+            sudo systemctl restart docker
+
+      - name: Deploy Node.js App in Docker Container
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ env.PUBLIC_IP }}
+          username: azureuser
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            mkdir -p ~/docker_app/nodejs-app
+            cd ~/docker_app/nodejs-app
+            git clone https://github.com/YOUR_GITHUB_USERNAME/YOUR_NODEJS_REPO.git .
+            docker build -t nodejs-app .
+            docker run -d -p 8080:8080 --name nodejs-container nodejs-app
+
+      - name: Output Application URL
+        run: echo "Your Node.js app is live at http://${{ env.PUBLIC_IP }}:8080"

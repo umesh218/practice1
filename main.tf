@@ -1,45 +1,65 @@
 provider "azurerm" {
-  features {}
+  features {
+    resource_group {
+      prevent_deletion_if_contains_resources = false
+    }
+  }
+  skip_provider_registration = true # Faster initialization
 }
 
 provider "tls" {}
 
-variable "ssh_public_key" {
-  description = "The SSH public key for VM"
-  type        = string
+# Generate SSH key pair only if not provided
+resource "tls_private_key" "ssh_key" {
+  count     = var.ssh_public_key == "" ? 1 : 0
+  algorithm = "RSA"
+  rsa_bits  = 2048
 }
 
-# Resource Group
+locals {
+  ssh_public_key = var.ssh_public_key != "" ? var.ssh_public_key : tls_private_key.ssh_key[0].public_key_openssh
+}
+
+# Resource Group with tags
 resource "azurerm_resource_group" "my_rg" {
-  name     = "my-resource-group"
-  location = "East US"
+  name     = "nodejs-app-rg-${lower(substr(md5(local.ssh_public_key), 0, 4))}"
+  location = "East US" # Consider a region closer to your users
+
+  tags = {
+    Environment = "Production"
+    App         = "NodeJS"
+  }
+
+  lifecycle {
+    prevent_destroy = false # Allow easier cleanup
+  }
 }
 
-# Virtual Network
-resource "azurerm_virtual_network" "my_vnet" {
-  name                = "my-vnet"
-  location            = azurerm_resource_group.my_rg.location
+# Network resources optimized for single VM
+module "network" {
+  source              = "Azure/network/azurerm"
+  version             = "~> 5.0"
   resource_group_name = azurerm_resource_group.my_rg.name
+  location            = azurerm_resource_group.my_rg.location
+  vnet_name           = "nodejs-vnet"
   address_space       = ["10.0.0.0/16"]
+  subnet_names        = ["nodejs-subnet"]
+  subnet_prefixes     = ["10.0.1.0/24"]
+
+  nsg_ids = {
+    "nodejs-subnet" = azurerm_network_security_group.my_nsg.id
+  }
 }
 
-# Subnet
-resource "azurerm_subnet" "my_subnet" {
-  name                 = "my-subnet"
-  resource_group_name  = azurerm_resource_group.my_rg.name
-  virtual_network_name = azurerm_virtual_network.my_vnet.name
-  address_prefixes     = ["10.0.1.0/24"]
-}
-
-# Network Security Group (NSG)
+# Optimized NSG with only necessary rules
 resource "azurerm_network_security_group" "my_nsg" {
-  name                = "my-nsg"
+  name                = "nodejs-nsg"
   location            = azurerm_resource_group.my_rg.location
   resource_group_name = azurerm_resource_group.my_rg.name
 
   security_rule {
-    name                       = "AllowSSH"
-    priority                   = 1001
+    name                       = "SSH"
+    priority                   = 100
     direction                  = "Inbound"
     access                     = "Allow"
     protocol                   = "Tcp"
@@ -50,8 +70,8 @@ resource "azurerm_network_security_group" "my_nsg" {
   }
 
   security_rule {
-    name                       = "AllowNodeJS"
-    priority                   = 1002
+    name                       = "NodeJS"
+    priority                   = 110
     direction                  = "Inbound"
     access                     = "Allow"
     protocol                   = "Tcp"
@@ -62,82 +82,90 @@ resource "azurerm_network_security_group" "my_nsg" {
   }
 }
 
-# Public IP
+# Public IP with DNS label
 resource "azurerm_public_ip" "my_public_ip" {
-  name                = "my-public-ip"
+  name                = "nodejs-ip"
   location            = azurerm_resource_group.my_rg.location
   resource_group_name = azurerm_resource_group.my_rg.name
   allocation_method   = "Static"
+  sku                 = "Standard"
+  domain_name_label   = "nodejs-app-${lower(substr(md5(local.ssh_public_key), 0, 4))}"
 }
 
-# Network Interface
+# Network Interface with accelerated networking
 resource "azurerm_network_interface" "my_nic" {
-  name                = "my-nic"
-  location            = azurerm_resource_group.my_rg.location
-  resource_group_name = azurerm_resource_group.my_rg.name
+  name                          = "nodejs-nic"
+  location                      = azurerm_resource_group.my_rg.location
+  resource_group_name           = azurerm_resource_group.my_rg.name
+  enable_accelerated_networking = true # Faster networking
 
   ip_configuration {
-    name                          = "my-nic-config"
-    subnet_id                     = azurerm_subnet.my_subnet.id
+    name                          = "internal"
+    subnet_id                     = module.network.vnet_subnets[0]
     private_ip_address_allocation = "Dynamic"
     public_ip_address_id          = azurerm_public_ip.my_public_ip.id
   }
 }
 
-# Associate NSG with NIC
-resource "azurerm_network_interface_security_group_association" "nsg_association" {
-  network_interface_id      = azurerm_network_interface.my_nic.id
-  network_security_group_id = azurerm_network_security_group.my_nsg.id
-}
-
-# SSH Key Pair (Private and Public)
-resource "tls_private_key" "ssh_key" {
-  algorithm = "RSA"
-  rsa_bits  = 2048
-}
-
-resource "azurerm_ssh_public_key" "my_ssh_key" {
-  name                = "my-ssh-key"
-  public_key          = tls_private_key.ssh_key.public_key_openssh
-  resource_group_name = azurerm_resource_group.my_rg.name
-  location            = azurerm_resource_group.my_rg.location
-}
-
-# Virtual Machine
+# Linux VM with cloud-init for faster provisioning
 resource "azurerm_linux_virtual_machine" "my_vm" {
-  name                = "my-vm"
-  location            = azurerm_resource_group.my_rg.location
-  resource_group_name = azurerm_resource_group.my_rg.name
-  size                = "Standard_B1s"
-  admin_username      = "azureuser"
-  network_interface_ids = [azurerm_network_interface.my_nic.id]
+  name                            = "nodejs-vm"
+  location                        = azurerm_resource_group.my_rg.location
+  resource_group_name             = azurerm_resource_group.my_rg.name
+  size                            = "Standard_B2s" # Slightly larger for better performance
+  admin_username                  = "azureuser"
+  disable_password_authentication = true
+  network_interface_ids           = [azurerm_network_interface.my_nic.id]
+  priority                        = "Spot" # Cost savings (optional)
+  eviction_policy                 = "Deallocate"
 
   admin_ssh_key {
     username   = "azureuser"
-    public_key = azurerm_ssh_public_key.my_ssh_key.public_key
+    public_key = local.ssh_public_key
   }
 
   os_disk {
     caching              = "ReadWrite"
-    storage_account_type = "Standard_LRS"
+    storage_account_type = "Premium_LRS" # Better performance
   }
 
   source_image_reference {
     publisher = "Canonical"
-    offer     = "UbuntuServer"
-    sku       = "18.04-LTS"
+    offer     = "0001-com-ubuntu-server-jammy" # Ubuntu 22.04 LTS
+    sku       = "22_04-lts-gen2"              # Gen2 for better performance
     version   = "latest"
   }
 
-  custom_data = base64encode(file("${path.module}/install-docker.sh"))
+  custom_data = base64encode(templatefile("${path.module}/cloud-init.yaml", {
+    docker_compose = filebase64("${path.module}/docker-compose.yml")
+  }))
+
+  # Pre-install Docker and app during provisioning
+  user_data = base64encode(templatefile("${path.module}/user-data.sh", {
+    app_directory = "/opt/nodejs-app"
+  }))
+
+  lifecycle {
+    ignore_changes = [
+      custom_data,
+      user_data
+    ]
+  }
 }
 
-# Output SSH Private Key and Public IP
-output "ssh_private_key" {
-  value     = tls_private_key.ssh_key.private_key_pem
-  sensitive = true
-}
-
+# Outputs with sensitive data marked
 output "public_ip" {
-  value = azurerm_public_ip.my_public_ip.ip_address
+  value       = azurerm_public_ip.my_public_ip.ip_address
+  description = "Public IP address of the VM"
+}
+
+output "ssh_private_key" {
+  value       = var.ssh_public_key == "" ? tls_private_key.ssh_key[0].private_key_pem : null
+  sensitive   = true
+  description = "Generated SSH private key (if not provided)"
+}
+
+output "app_url" {
+  value       = "http://${azurerm_public_ip.my_public_ip.domain_name_label}.${azurerm_public_ip.my_public_ip.location}.cloudapp.azure.com:8080"
+  description = "Application URL"
 }

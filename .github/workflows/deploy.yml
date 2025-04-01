@@ -1,13 +1,16 @@
-name: Azure Deployment with Existing Service Principal
+name: Azure Deployment with Service Principal
 
 on:
   push:
     branches: [master]
 
+permissions:
+  contents: read  # Only needs read access to your code
+
 env:
   TF_IN_AUTOMATION: true
-  RESOURCE_GROUP_NAME: "github-actions-rg-$(date +%s)"
-  VM_NAME: "auto-vm-$(date +%s)"
+  RESOURCE_GROUP_NAME: "github-actions-rg"
+  VM_NAME: "deployment-vm"
 
 jobs:
   deploy:
@@ -18,16 +21,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Login to Azure (Service Principal)
+      - name: Azure Login with Service Principal
         uses: azure/login@v1
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          creds: ${{ secrets.AZURE_CREDENTIALS }}  # JSON format
+          enable-AzPSSession: false  # Faster login
           environment: azurecloud
-          allow-no-subscriptions: false
-        env:
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -36,25 +35,22 @@ jobs:
         run: terraform init -input=false
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve -parallelism=4
+        run: terraform apply -auto-approve
         env:
-          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
 
-      - name: Get Public IP
-        run: echo "PUBLIC_IP=$(terraform output -raw public_ip)" >> $GITHUB_ENV
+      - name: Get VM IP
+        id: get-ip
+        run: echo "VM_IP=$(terraform output -raw public_ip)" >> $GITHUB_ENV
 
       - name: Deploy Application
         uses: appleboy/ssh-action@v0.1.7
         with:
-          host: ${{ env.PUBLIC_IP }}
+          host: ${{ env.VM_IP }}
           username: azureuser
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             sudo apt-get update -y
             sudo apt-get install -y docker.io
             sudo systemctl enable --now docker
-            sudo docker run -d -p 8080:8080 --name app your-docker-image
+            sudo docker run -d -p 8080:8080 --name app your-image

@@ -2,6 +2,11 @@ provider "azurerm" {
   features {}
 }
 
+variable "ssh_public_key" {
+  description = "The SSH public key for VM"
+  type        = string
+}
+
 resource "azurerm_resource_group" "my_rg" {
   name     = "my-resource-group"
   location = "East US"
@@ -88,7 +93,7 @@ resource "azurerm_linux_virtual_machine" "my_vm" {
 
   admin_ssh_key {
     username   = "azureuser"
-    public_key = file("~/.ssh/id_rsa.pub")
+    public_key = var.ssh_public_key
   }
 
   os_disk {

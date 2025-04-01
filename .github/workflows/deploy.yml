@@ -1,16 +1,24 @@
-name: Deploy to Azure VM
+name: Deploy Node.js App on Azure VM
 
 on:
   push:
     branches:
-      - main
+      - master  # Triggers workflow when code is pushed to 'master'
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v3
+
+      - name: Log in to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v2
@@ -18,14 +26,35 @@ jobs:
       - name: Initialize Terraform
         run: terraform init
 
-      - name: Apply Terraform
+      - name: Apply Terraform configuration
         run: terraform apply -auto-approve
 
-      - name: Store Public IP
-        run: bash store-public-ip.sh
+      - name: Get Public IP from Terraform Output
+        id: get-ip
+        run: echo "PUBLIC_IP=$(terraform output -raw public_ip)" >> $GITHUB_ENV
 
-      - name: SSH into VM and Run Container
-        run: |
-          ssh -o StrictHostKeyChecking=no azureuser@${{ secrets.VM_PUBLIC_IP }} << 'EOF'
-            docker run -d -p 8080:8080 my-nodejs-app
-          EOF
+      - name: Wait for VM to be ready
+        run: sleep 60  # Give VM time to boot up
+
+      - name: Install Docker on Azure VM
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ env.PUBLIC_IP }}
+          username: azureuser
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            bash install-docker.sh
+
+      - name: Deploy Node.js App in Docker Container
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ env.PUBLIC_IP }}
+          username: azureuser
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd docker_app/nodejs-app-first-dockerfile
+            docker build -t nodejs-app .
+            docker run -d -p 8080:8080 --name nodejs-container nodejs-app
+
+      - name: Output Application URL
+        run: echo "Your Node.js app is live at http://${{ env.PUBLIC_IP }}:8080"

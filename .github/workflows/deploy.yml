@@ -9,9 +9,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    permissions:
-      id-token: write  # Enables OIDC authentication
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -19,10 +16,13 @@ jobs:
       - name: Log in to Azure
         uses: azure/login@v1
         with:
+          auth-type: SERVICE_PRINCIPAL
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          auth-type: "SERVICE_PRINCIPAL"
+          enable-AzPSSession: false
+          environment: azurecloud
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v2
@@ -30,13 +30,7 @@ jobs:
       - name: Initialize Terraform
         run: terraform init
 
-      - name: Validate Terraform Configuration
-        run: terraform validate
-
-      - name: Check Terraform Formatting
-        run: terraform fmt -check
-
-      - name: Apply Terraform Configuration
+      - name: Apply Terraform configuration
         run: terraform apply -auto-approve
 
       - name: Get Public IP from Terraform Output
@@ -53,10 +47,7 @@ jobs:
           username: azureuser
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            sudo apt-get update
-            sudo apt-get install -y docker.io
-            sudo systemctl enable docker
-            sudo systemctl restart docker
+            bash install-docker.sh
 
       - name: Deploy Node.js App in Docker Container
         uses: appleboy/ssh-action@v0.1.7
@@ -65,9 +56,7 @@ jobs:
           username: azureuser
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            mkdir -p ~/docker_app/nodejs-app
-            cd ~/docker_app/nodejs-app
-            git clone https://github.com/YOUR_GITHUB_USERNAME/YOUR_NODEJS_REPO.git .
+            cd docker_app/nodejs-app-first-dockerfile
             docker build -t nodejs-app .
             docker run -d -p 8080:8080 --name nodejs-container nodejs-app
 

@@ -6,7 +6,7 @@ on:
       - master
 
 env:
-  TF_IN_AUTOMATION: true  # Disables Terraform interactive prompts
+  TF_IN_AUTOMATION: true
   ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
   ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -15,7 +15,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 45  # Increased timeout for VM provisioning
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -29,13 +29,13 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           environment: azurecloud
-          enable-AzPSSession: false  # Disable PowerShell session for faster login
-          auth-type: service_principal  # Must be lowercase
+          enable-AzPSSession: false
+          auth-type: service_principal
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v2
         with:
-          terraform_wrapper: false  # Disable wrapper for direct execution
+          terraform_wrapper: false
 
       - name: Terraform Init
         run: terraform init -input=false
@@ -43,7 +43,7 @@ jobs:
       - name: Terraform Apply
         run: terraform apply -auto-approve -parallelism=4
         env:
-          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}  # Set your SSH public key
+          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
 
       - name: Get Terraform Outputs
         id: outputs
@@ -53,13 +53,18 @@ jobs:
           terraform output -raw ssh_private_key >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Wait for VM SSH Access
-        uses: appleboy/wait-until-action@master
-        with:
-          host: ${{ env.PUBLIC_IP }}
-          port: 22
-          timeout: 300  # 5 minute timeout
-          commandTimeout: 10
+      - name: Wait for VM to be ready
+        run: |
+          for i in {1..30}; do
+            if nc -z -w5 ${{ env.PUBLIC_IP }} 22; then
+              echo "VM is ready"
+              exit 0
+            fi
+            echo "Waiting for VM to be ready... Attempt $i/30"
+            sleep 10
+          done
+          echo "Timeout waiting for VM"
+          exit 1
 
       - name: Install Docker and Deploy App
         uses: appleboy/ssh-action@v0.1.7
@@ -81,8 +86,22 @@ jobs:
             docker build -t nodejs-app .
             docker run -d -p 8080:8080 --name nodejs-container nodejs-app
 
+      - name: Verify Application Deployment
+        uses: appleboy/ssh-action@v0.1.7
+        with:
+          host: ${{ env.PUBLIC_IP }}
+          username: azureuser
+          key: ${{ env.SSH_PRIVATE_KEY }}
+          script: |
+            if docker ps | grep nodejs-container; then
+              echo "Application is running successfully"
+              exit 0
+            else
+              echo "Application failed to start"
+              exit 1
+            fi
+
       - name: Output Application URL
         run: |
           echo "Application deployed successfully!"
           echo "Access your Node.js app at: http://${{ env.PUBLIC_IP }}:8080"
-          echo "SSH to the VM with: ssh -i <(echo \"$SSH_PRIVATE_KEY\") azureuser@${{ env.PUBLIC_IP }}"

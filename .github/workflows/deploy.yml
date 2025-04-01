@@ -1,56 +1,102 @@
-name: Azure Deployment with Service Principal
+name: Fully Automated Azure Deployment
 
 on:
   push:
     branches: [master]
 
-permissions:
-  contents: read  # Only needs read access to your code
-
 env:
-  TF_IN_AUTOMATION: true
-  RESOURCE_GROUP_NAME: "github-actions-rg"
-  VM_NAME: "deployment-vm"
+  RESOURCE_GROUP: "auto-deploy-rg-$(date +%s)"
+  LOCATION: "eastus"
 
 jobs:
-  deploy:
+  setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    outputs:
+      ssh_public_key: ${{ steps.generate-ssh.outputs.public_key }}
+      ssh_private_key: ${{ steps.generate-ssh.outputs.private_key }}
+
+    steps:
+      - name: Generate SSH Key Pair
+        id: generate-ssh
+        run: |
+          mkdir -p ./ssh
+          ssh-keygen -t rsa -b 4096 -f ./ssh/id_rsa -N '' -q
+          echo "public_key=$(cat ./ssh/id_rsa.pub)" >> $GITHUB_OUTPUT
+          echo "private_key<<EOF" >> $GITHUB_OUTPUT
+          cat ./ssh/id_rsa >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Azure Login with Service Principal
+      - name: Login to Azure
         uses: azure/login@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}  # JSON format
-          enable-AzPSSession: false  # Faster login
-          environment: azurecloud
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        env:
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
+
+      - name: Configure Terraform Variables
+        run: |
+          cat > terraform.tfvars <<EOF
+          resource_group_name = "${{ env.RESOURCE_GROUP }}"
+          location = "${{ env.LOCATION }}"
+          ssh_public_key = "${{ needs.setup.outputs.ssh_public_key }}"
+          EOF
 
       - name: Terraform Init
         run: terraform init -input=false
 
       - name: Terraform Apply
         run: terraform apply -auto-approve
-        env:
-          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
 
       - name: Get VM IP
-        id: get-ip
         run: echo "VM_IP=$(terraform output -raw public_ip)" >> $GITHUB_ENV
 
-      - name: Deploy Application
+      - name: Setup Docker and Deploy App
         uses: appleboy/ssh-action@v0.1.7
         with:
           host: ${{ env.VM_IP }}
           username: azureuser
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          key: ${{ needs.setup.outputs.ssh_private_key }}
           script: |
+            # Install Docker
             sudo apt-get update -y
             sudo apt-get install -y docker.io
             sudo systemctl enable --now docker
-            sudo docker run -d -p 8080:8080 --name app your-image
+            
+            # Deploy application
+            cd /home/azureuser/app
+            docker compose up -d
+
+  cleanup:
+    needs: [setup, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        env:
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+
+      - name: Delete Resource Group
+        run: |
+          az group delete \
+            --name "${{ env.RESOURCE_GROUP }}" \
+            --yes \
+            --no-wait

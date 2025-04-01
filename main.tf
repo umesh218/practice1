@@ -2,16 +2,20 @@ provider "azurerm" {
   features {}
 }
 
+provider "tls" {}
+
 variable "ssh_public_key" {
   description = "The SSH public key for VM"
   type        = string
 }
 
+# Resource Group
 resource "azurerm_resource_group" "my_rg" {
   name     = "my-resource-group"
   location = "East US"
 }
 
+# Virtual Network
 resource "azurerm_virtual_network" "my_vnet" {
   name                = "my-vnet"
   location            = azurerm_resource_group.my_rg.location
@@ -19,6 +23,7 @@ resource "azurerm_virtual_network" "my_vnet" {
   address_space       = ["10.0.0.0/16"]
 }
 
+# Subnet
 resource "azurerm_subnet" "my_subnet" {
   name                 = "my-subnet"
   resource_group_name  = azurerm_resource_group.my_rg.name
@@ -26,7 +31,7 @@ resource "azurerm_subnet" "my_subnet" {
   address_prefixes     = ["10.0.1.0/24"]
 }
 
-# ✅ Add Network Security Group (NSG) for SSH & Node.js Port 8080
+# Network Security Group (NSG)
 resource "azurerm_network_security_group" "my_nsg" {
   name                = "my-nsg"
   location            = azurerm_resource_group.my_rg.location
@@ -57,6 +62,7 @@ resource "azurerm_network_security_group" "my_nsg" {
   }
 }
 
+# Public IP
 resource "azurerm_public_ip" "my_public_ip" {
   name                = "my-public-ip"
   location            = azurerm_resource_group.my_rg.location
@@ -64,6 +70,7 @@ resource "azurerm_public_ip" "my_public_ip" {
   allocation_method   = "Static"
 }
 
+# Network Interface
 resource "azurerm_network_interface" "my_nic" {
   name                = "my-nic"
   location            = azurerm_resource_group.my_rg.location
@@ -77,12 +84,26 @@ resource "azurerm_network_interface" "my_nic" {
   }
 }
 
-# ✅ Associate NSG with NIC
+# Associate NSG with NIC
 resource "azurerm_network_interface_security_group_association" "nsg_association" {
   network_interface_id      = azurerm_network_interface.my_nic.id
   network_security_group_id = azurerm_network_security_group.my_nsg.id
 }
 
+# SSH Key Pair (Private and Public)
+resource "tls_private_key" "ssh_key" {
+  algorithm = "RSA"
+  rsa_bits  = 2048
+}
+
+resource "azurerm_ssh_public_key" "my_ssh_key" {
+  name                = "my-ssh-key"
+  public_key          = tls_private_key.ssh_key.public_key_openssh
+  resource_group_name = azurerm_resource_group.my_rg.name
+  location            = azurerm_resource_group.my_rg.location
+}
+
+# Virtual Machine
 resource "azurerm_linux_virtual_machine" "my_vm" {
   name                = "my-vm"
   location            = azurerm_resource_group.my_rg.location
@@ -93,7 +114,7 @@ resource "azurerm_linux_virtual_machine" "my_vm" {
 
   admin_ssh_key {
     username   = "azureuser"
-    public_key = var.ssh_public_key
+    public_key = azurerm_ssh_public_key.my_ssh_key.public_key
   }
 
   os_disk {
@@ -111,7 +132,12 @@ resource "azurerm_linux_virtual_machine" "my_vm" {
   custom_data = base64encode(file("${path.module}/install-docker.sh"))
 }
 
-# ✅ Output Public IP for GitHub Actions
+# Output SSH Private Key and Public IP
+output "ssh_private_key" {
+  value     = tls_private_key.ssh_key.private_key_pem
+  sensitive = true
+}
+
 output "public_ip" {
   value = azurerm_public_ip.my_public_ip.ip_address
 }

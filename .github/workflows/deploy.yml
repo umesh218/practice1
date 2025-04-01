@@ -9,6 +9,9 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    permissions:
+      id-token: write  # Required for authentication with Azure using OIDC
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -16,7 +19,7 @@ jobs:
       - name: Log in to Azure
         uses: azure/login@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}  # Using full credentials JSON from GitHub Secrets
+          creds: '{"clientId": "${{ secrets.AZURE_CLIENT_ID }}", "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}", "tenantId": "${{ secrets.AZURE_TENANT_ID }}", "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}"}'
           environment: azurecloud
           allow-no-subscriptions: false
 
@@ -28,6 +31,10 @@ jobs:
 
       - name: Apply Terraform configuration
         run: terraform apply -auto-approve
+
+      - name: Get SSH Private Key from Terraform Output
+        id: get-ssh-key
+        run: echo "SSH_PRIVATE_KEY=$(terraform output -raw ssh_private_key)" >> $GITHUB_ENV
 
       - name: Get Public IP from Terraform Output
         id: get-ip
@@ -41,7 +48,7 @@ jobs:
         with:
           host: ${{ env.PUBLIC_IP }}
           username: azureuser
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          key: ${{ env.SSH_PRIVATE_KEY }}
           script: |
             bash install-docker.sh
 
@@ -50,7 +57,7 @@ jobs:
         with:
           host: ${{ env.PUBLIC_IP }}
           username: azureuser
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          key: ${{ env.SSH_PRIVATE_KEY }}
           script: |
             cd docker_app/nodejs-app-first-dockerfile
             docker build -t nodejs-app .

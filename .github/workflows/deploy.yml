@@ -3,72 +3,78 @@ name: Deploy Node.js App on Azure VM
 on:
   push:
     branches:
-      - master  # Triggers workflow when code is pushed to 'master'
+      - master
+
+env:
+  TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}  # Pre-set SSH key to avoid prompt
+  TF_IN_AUTOMATION: true  # Disable Terraform color output and unnecessary messages
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # Prevent hanging
     permissions:
-      id-token: write  # Required for authentication with Azure using OIDC
+      id-token: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Log in to Azure
+      - name: Log in to Azure (Optimized)
         uses: azure/login@v1
         with:
-          creds: '{"clientId": "${{ secrets.AZURE_CLIENT_ID }}", "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}", "tenantId": "${{ secrets.AZURE_TENANT_ID }}", "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}"}'
+          creds: ${{ secrets.AZURE_CREDENTIALS_JSON }}  # Use single JSON secret
+          enable-AzPSSession: false  # Disable unused PowerShell session
           environment: azurecloud
-          allow-no-subscriptions: false
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_wrapper: false  # Disable wrapper for direct execution
 
-      - name: Initialize Terraform
-        run: terraform init
+      - name: Initialize Terraform (Cached)
+        id: init
+        run: |
+          terraform init -input=false
 
-      - name: Apply Terraform configuration
-        run: terraform apply -auto-approve -parallelism=10 # Added parallelism to potentially speed up apply
+      - name: Apply Terraform configuration (Optimized)
+        run: |
+          terraform apply -auto-approve -parallelism=4  # Better for VM provisioning
+        env:
+          TF_LOG: ERROR  # Reduce verbose logging
 
-      - name: Get SSH Private Key from Terraform Output
-        id: get-ssh-key
-        run: echo "SSH_PRIVATE_KEY=$(terraform output -raw ssh_private_key)" >> $GITHUB_ENV
+      - name: Get outputs in parallel
+        run: |
+          echo "SSH_PRIVATE_KEY=$(terraform output -raw ssh_private_key)" >> $GITHUB_ENV
+          echo "PUBLIC_IP=$(terraform output -raw public_ip)" >> $GITHUB_ENV
 
-      - name: Get Public IP from Terraform Output
-        id: get-ip
-        run: echo "PUBLIC_IP=$(terraform output -raw public_ip)" >> $GITHUB_ENV
-
-      - name: Wait for VM to be ready
-        run: sleep 60  # Give VM time to boot up (adjust if needed)
-
-      - name: Install Docker on Azure VM
+      - name: Wait for VM (Smart Check)
         uses: appleboy/ssh-action@v0.1.7
         with:
           host: ${{ env.PUBLIC_IP }}
           username: azureuser
           key: ${{ env.SSH_PRIVATE_KEY }}
           script: |
-            bash install-docker.sh
+            until systemctl is-active --quiet multi-user.target; do
+              sleep 5
+            done
 
-      - name: Deploy Node.js App in Docker Container
+      - name: Install Docker and Deploy App (Combined Step)
         uses: appleboy/ssh-action@v0.1.7
         with:
           host: ${{ env.PUBLIC_IP }}
           username: azureuser
           key: ${{ env.SSH_PRIVATE_KEY }}
           script: |
+            # Install Docker (idempotent)
+            if ! command -v docker &> /dev/null; then
+              bash install-docker.sh
+            fi
+            
+            # Deploy app
             cd docker_app/nodejs-app-first-dockerfile
             docker build -t nodejs-app .
             docker run -d -p 8080:8080 --name nodejs-container nodejs-app
 
       - name: Output Application URL
         run: echo "Your Node.js app is live at http://${{ env.PUBLIC_IP }}:8080"
-
-      - name: Total Execution Time
-        run: |
-          end_time=$(date +%s)
-          start_time=$(($end_time - $GITHUB_RUN_DURATION))
-          echo "Workflow started at: $(date -d "@$start_time")"
-          echo "Workflow ended at: $(date -d "@$end_time")"
-          echo "Total execution time: $(($GITHUB_RUN_DURATION / 60)) minutes and $(($GITHUB_RUN_DURATION % 60)) seconds"

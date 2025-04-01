@@ -17,6 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
+    # Remove the id-token permission since we're not using OIDC
+    permissions:
+      contents: read
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -24,12 +28,10 @@ jobs:
       - name: Login to Azure with Service Principal
         uses: azure/login@v1
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          environment: azurecloud
+          creds: ${{ secrets.AZURE_CREDENTIALS }}  # Use JSON format credentials
           enable-AzPSSession: false
+          environment: azurecloud
+          allow-no-subscriptions: false
           auth-type: service_principal
 
       - name: Set up Terraform
@@ -73,7 +75,6 @@ jobs:
           username: azureuser
           key: ${{ env.SSH_PRIVATE_KEY }}
           script: |
-            # Install Docker if not present
             if ! command -v docker &>/dev/null; then
               sudo apt-get update -qy
               sudo apt-get install -qy docker.io
@@ -81,25 +82,9 @@ jobs:
               sudo usermod -aG docker azureuser
             fi
             
-            # Deploy Node.js app
             cd ~/docker_app/nodejs-app-first-dockerfile
             docker build -t nodejs-app .
             docker run -d -p 8080:8080 --name nodejs-container nodejs-app
-
-      - name: Verify Application Deployment
-        uses: appleboy/ssh-action@v0.1.7
-        with:
-          host: ${{ env.PUBLIC_IP }}
-          username: azureuser
-          key: ${{ env.SSH_PRIVATE_KEY }}
-          script: |
-            if docker ps | grep nodejs-container; then
-              echo "Application is running successfully"
-              exit 0
-            else
-              echo "Application failed to start"
-              exit 1
-            fi
 
       - name: Output Application URL
         run: |

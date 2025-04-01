@@ -6,75 +6,83 @@ on:
       - master
 
 env:
-  TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}  # Pre-set SSH key to avoid prompt
-  TF_IN_AUTOMATION: true  # Disable Terraform color output and unnecessary messages
+  TF_IN_AUTOMATION: true  # Disables Terraform interactive prompts
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # Prevent hanging
-    permissions:
-      id-token: write
+    timeout-minutes: 45  # Increased timeout for VM provisioning
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Log in to Azure (Optimized)
+      - name: Login to Azure with Service Principal
         uses: azure/login@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS_JSON }}  # Use single JSON secret
-          enable-AzPSSession: false  # Disable unused PowerShell session
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           environment: azurecloud
+          enable-AzPSSession: false  # Disable PowerShell session for faster login
+          auth-type: service_principal  # Must be lowercase
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_wrapper: false  # Disable wrapper for direct execution
 
-      - name: Initialize Terraform (Cached)
-        id: init
-        run: |
-          terraform init -input=false
+      - name: Terraform Init
+        run: terraform init -input=false
 
-      - name: Apply Terraform configuration (Optimized)
-        run: |
-          terraform apply -auto-approve -parallelism=4  # Better for VM provisioning
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -parallelism=4
         env:
-          TF_LOG: ERROR  # Reduce verbose logging
+          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}  # Set your SSH public key
 
-      - name: Get outputs in parallel
+      - name: Get Terraform Outputs
+        id: outputs
         run: |
-          echo "SSH_PRIVATE_KEY=$(terraform output -raw ssh_private_key)" >> $GITHUB_ENV
           echo "PUBLIC_IP=$(terraform output -raw public_ip)" >> $GITHUB_ENV
+          echo "SSH_PRIVATE_KEY<<EOF" >> $GITHUB_ENV
+          terraform output -raw ssh_private_key >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
-      - name: Wait for VM (Smart Check)
+      - name: Wait for VM SSH Access
+        uses: appleboy/wait-until-action@master
+        with:
+          host: ${{ env.PUBLIC_IP }}
+          port: 22
+          timeout: 300  # 5 minute timeout
+          commandTimeout: 10
+
+      - name: Install Docker and Deploy App
         uses: appleboy/ssh-action@v0.1.7
         with:
           host: ${{ env.PUBLIC_IP }}
           username: azureuser
           key: ${{ env.SSH_PRIVATE_KEY }}
           script: |
-            until systemctl is-active --quiet multi-user.target; do
-              sleep 5
-            done
-
-      - name: Install Docker and Deploy App (Combined Step)
-        uses: appleboy/ssh-action@v0.1.7
-        with:
-          host: ${{ env.PUBLIC_IP }}
-          username: azureuser
-          key: ${{ env.SSH_PRIVATE_KEY }}
-          script: |
-            # Install Docker (idempotent)
-            if ! command -v docker &> /dev/null; then
-              bash install-docker.sh
+            # Install Docker if not present
+            if ! command -v docker &>/dev/null; then
+              sudo apt-get update -qy
+              sudo apt-get install -qy docker.io
+              sudo systemctl enable --now docker
+              sudo usermod -aG docker azureuser
             fi
             
-            # Deploy app
-            cd docker_app/nodejs-app-first-dockerfile
+            # Deploy Node.js app
+            cd ~/docker_app/nodejs-app-first-dockerfile
             docker build -t nodejs-app .
             docker run -d -p 8080:8080 --name nodejs-container nodejs-app
 
       - name: Output Application URL
-        run: echo "Your Node.js app is live at http://${{ env.PUBLIC_IP }}:8080"
+        run: |
+          echo "Application deployed successfully!"
+          echo "Access your Node.js app at: http://${{ env.PUBLIC_IP }}:8080"
+          echo "SSH to the VM with: ssh -i <(echo \"$SSH_PRIVATE_KEY\") azureuser@${{ env.PUBLIC_IP }}"
